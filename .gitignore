@@ -1,0 +1,32 @@
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Database and local data
+*.db
+*.db-shm
+*.db-wal
+*.sqlite3
+data/uploads/
+data/seed/
+seed_links.txt
+
+# Frontend
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+
+# OS
+.DS_Store
