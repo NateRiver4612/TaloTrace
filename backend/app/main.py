@@ -5,7 +5,7 @@ from fastapi import APIRouter, FastAPI
 from . import models  # noqa: F401  (registers tables on Base.metadata)
 from .db import Base, engine
 from .routers import interview
-
+from .routers import hr, hr_auth, interview
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -25,3 +25,5 @@ def health():
 
 app.include_router(api_router)
 app.include_router(interview.router)
+app.include_router(hr_auth.router)
+app.include_router(hr.router)

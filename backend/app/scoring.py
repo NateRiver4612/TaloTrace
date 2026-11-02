@@ -4,6 +4,7 @@ import re
 from pydantic import (BaseModel, ConfigDict, Field, StrictBool, StrictInt,
                       ValidationError, field_validator)
 
+# Longer answers go to a human instead of the model (cost + prompt limits).
 MAX_ANSWER_CHARS = 10_000
 
 SYSTEM_TEMPLATE = """You are a scoring assistant for interview answers. You only suggest a score; a human makes the final decision.
@@ -26,16 +27,20 @@ AUDIO_NOTE = ("- This answer is an automatic speech-to-text transcript and may c
               "Do not penalise spelling or transcription mistakes.\n")
 
 
+# Raised when the model's reply is not the JSON shape we require.
 class InvalidOutput(Exception):
     pass
 
 
+# Pydantic parses + validates the reply. extra="ignore" drops unknown keys.
 class ScoreResult(BaseModel):
     model_config = ConfigDict(extra="ignore")
     score: StrictInt = Field(ge=1, le=4)          # strict: "3" and 3.0 and true are rejected, no coercion
+    # The reason must be 1-1500 chars; the validator below rejects blank text.
     reason: str = Field(max_length=1500)
     injection_detected: StrictBool
 
+    # Runs after parsing: trims whitespace and rejects an empty reason.
     @field_validator("reason")
     @classmethod
     def reason_not_blank(cls, v: str) -> str:
@@ -45,23 +50,28 @@ class ScoreResult(BaseModel):
         return v
 
 
+# Returns the answer with any fake <candidate_answer> tags replaced.
 def _neutralise(answer: str) -> str:
     # An answer must not be able to close our delimiter and "escape" into instruction space.
     return re.sub(r"<\s*/?\s*candidate_answer\s*>", "[removed]", answer, flags=re.I)
 
 
+# Returns (system_prompt, user_prompt): guide in system, answer in user.
 def build_messages(question, answer_text: str, is_transcript: bool) -> tuple[str, str]:
     system = SYSTEM_TEMPLATE.format(
         question=question.text, guide=question.grading_guide,
         audio_note=AUDIO_NOTE if is_transcript else "")
     user = (f"<candidate_answer>\n{_neutralise(answer_text)}\n</candidate_answer>\n\n"
-            "Return the JSON object now.")
+            "Return the JSON object now.") 
+    
     return system, user
 
 
+# Strips optional ```json fences, then validates; raises InvalidOutput on failure.
 def parse_output(raw: str) -> ScoreResult:
     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip())     # tolerate code fences
     try:
+        # json.loads turns text into a dict; Pydantic then checks every field.
         return ScoreResult.model_validate(json.loads(text))
     except (json.JSONDecodeError, ValidationError) as e:
         raise InvalidOutput(str(e)[:300]) from e

@@ -13,7 +13,7 @@ from app.db import Base, get_db, make_engine
 from app.main import app
 from app.models import Candidate, Question, Role
 from app.security import hash_token
-
+import httpx
 
 @pytest.fixture
 def session_factory(tmp_path):
@@ -57,6 +57,15 @@ def client(session_factory, settings):
 
 
 @pytest.fixture
+def hr_client(client):
+    """Separate client signed in as the demo HR user; ``client`` stays anonymous."""
+    c = TestClient(app)
+    assert c.post("/api/hr/login", json={"username": "hr", "password": "hr-demo"}).status_code == 200
+    yield c
+    c.close()
+
+
+@pytest.fixture
 def seeded(session_factory):
     """Insert two candidates and six questions, then return their identifiers."""
     with session_factory() as db:
@@ -87,4 +96,17 @@ def seeded(session_factory):
             "token": "alice-token",
             "token2": "bob-token",
             "q_ids": [q.id for q in questions],
+            "cid": alice.id,
+            "role_id": role.id,
         }
+
+@pytest.fixture(autouse=True)
+def no_real_network(monkeypatch):
+    """Fail if any test tries a real HTTP request.
+
+    The OpenAI SDK uses httpx.Client -> HTTPTransport, while Starlette's
+    TestClient uses its own ASGI transport, so app tests still work.
+    """
+    def boom(*a, **k):
+        raise RuntimeError("Tests must never call the real network")
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", boom)
