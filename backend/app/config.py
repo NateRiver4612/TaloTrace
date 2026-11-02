@@ -21,10 +21,15 @@ class Settings(BaseSettings):
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-chat"
 
+
+
     database_url: str = f"sqlite:///{REPO_ROOT / 'data' / 'hr.db'}"
     session_secret: str = "dev-only-change-me"
     transcriber: Literal["whisper", "mock"] = "whisper"
     upload_dir: str = str(REPO_ROOT / "data" / "uploads")
+
+    hr_username: str = "hr"            # MOCK sign-in credentials, demo only
+    hr_password: str = "hr-demo"
 
 
 @lru_cache
