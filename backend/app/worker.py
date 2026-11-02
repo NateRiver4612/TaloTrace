@@ -44,6 +44,7 @@ def as_utc(dt: datetime) -> datetime:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
+# Doubles each time: attempt 1 -> 5s, 2 -> 10s, 3 -> 20s.
 def backoff(attempts: int) -> timedelta:
     """Exponential delay before retrying: 5s, 10s, 20s for attempts 1..3."""
     return timedelta(seconds=5 * 2 ** (attempts - 1))
@@ -52,7 +53,9 @@ def backoff(attempts: int) -> timedelta:
 def recover_stale(session_factory) -> None:
     """Requeue or fail jobs whose worker died while they were 'running'."""
     with session_factory() as db:
+        # Only 'running' jobs can be stale; nothing else has an owner.
         for job in db.scalars(select(ScoreJob).where(ScoreJob.status == "running")):
+            # Stale = locked longer than STALE_AFTER (worker likely died).
             if job.locked_at and now() - as_utc(job.locked_at) > STALE_AFTER:
                 if job.attempts >= MAX_ATTEMPTS:
                     # No attempts left: fail instead of looping forever.
@@ -60,6 +63,7 @@ def recover_stale(session_factory) -> None:
                 else:
                     # Requeue; claim_next_job() applies the normal backoff.
                     job.status, job.last_error = "queued", "Worker stopped while processing; requeued"
+                # Clear the lock so the job can be claimed again.
                 job.locked_at = None
         db.commit()
 
@@ -81,15 +85,18 @@ def claim_next_job(session_factory) -> int | None:
             .where(ScoreJob.status == "queued", Answer.is_current.is_(True))   # skip superseded answers
             .order_by(ScoreJob.id)).all()
         for job_id, attempts, updated_at in rows:
+            # Backoff: skip a retry until last update + 5s/10s/20s has passed.
             if attempts > 0 and now() < as_utc(updated_at) + backoff(attempts):
-                continue                                                      # still backing off
-            # Atomic claim: only one worker can flip queued -> running.
+                continue
+            # Atomic claim: the WHERE only matches if the job is still queued.
+            # If another worker already took it, rowcount is 0 and we move on.
             res = db.execute(update(ScoreJob)
                              .where(ScoreJob.id == job_id, ScoreJob.status == "queued")
+                             # SQL increments attempts from the DB value, not the stale row.
                              .values(status="running", attempts=ScoreJob.attempts + 1, locked_at=now()))
-            db.commit()
+            db.commit()                    # save the claim so other workers see it
             if res.rowcount == 1:
-                return job_id
+                return job_id              # this worker won; caller loads it by id
     return None
 
 
@@ -98,12 +105,14 @@ def _end(job: ScoreJob, status: str, *, error: str | None = None, reason: str | 
     job.status, job.last_error, job.needs_person_reason, job.locked_at = status, error, reason, None
 
 
+# Returns (raw_reply, parsed_result, error); error is None on success.
 def _complete_json(llm, system: str, user: str):
     """Ask for JSON, retrying once with a correction if parsing/validation fails.
 
     Returns ``(raw, result, invalid)``. On success ``invalid`` is None; after a
     second failure ``result`` is None and ``invalid`` holds the validation error.
     """
+    # First attempt with the normal prompt.
     raw = llm.complete(system, user)
     try:
         return raw, parse_output(raw), None
@@ -113,6 +122,7 @@ def _complete_json(llm, system: str, user: str):
         try:
             return raw, parse_output(raw), None
         except InvalidOutput as e:
+            # Still invalid: hand back the error so process_job asks a human.
             return raw, None, e
 
 
@@ -130,6 +140,7 @@ def process_job(session_factory, job_id: int, llm, transcriber, upload_dir: str)
             text = answer.text
             if is_transcript:
                 tr = db.scalar(select(Transcript).where(Transcript.answer_id == answer.id))
+                # No transcript yet: transcribe once and store the text.
                 if tr is None:
                     spoken = transcriber.transcribe(str(Path(upload_dir) / answer.audio_path))
                     tr = Transcript(answer_id=answer.id, text=spoken, engine=transcriber.name)
@@ -149,11 +160,14 @@ def process_job(session_factory, job_id: int, llm, transcriber, upload_dir: str)
 
             # _complete_json() retries once only for invalid model output.
             # API/transcription failures raised here are handled below.
+            # Build prompts: guide in system, candidate text in user.
             system, user = build_messages(question, text, is_transcript)
+            # raw = last reply, result = parsed score, invalid = parse error.
             raw, result, invalid = _complete_json(llm, system, user)
         except Exception as e:
             # Roll back any partial work, then requeue transient failures.
             db.rollback()
+            # LLM errors carry .transient; unknown errors default to retryable.
             transient = getattr(e, "transient", True)
             msg = str(e) if hasattr(e, "transient") or "Transcription" in type(e).__name__ \
                 else f"Unexpected error: {type(e).__name__}"
@@ -167,7 +181,7 @@ def process_job(session_factory, job_id: int, llm, transcriber, upload_dir: str)
             db.commit()
             return
 
-        # Both model calls succeeded, but the final reply may still be invalid.
+        # Both model calls ran but the second reply was still unusable -> human.
         if invalid is not None:
             db.execute(delete(SuggestedScore).where(SuggestedScore.answer_id == answer.id))
             _end(job, "needs_person", error=f"Invalid model output after retry: {raw[:300]}",
@@ -177,6 +191,7 @@ def process_job(session_factory, job_id: int, llm, transcriber, upload_dir: str)
 
         # A re-run may re-score this answer, so replace any previous suggestion.
         db.execute(delete(SuggestedScore).where(SuggestedScore.answer_id == answer.id))
+        # Save the suggestion; HR still makes the final call.
         db.add(SuggestedScore(answer_id=answer.id, score=result.score, reason=result.reason,
                               injection_flag=result.injection_detected, model=llm.model, raw_output=raw))
 
@@ -185,15 +200,18 @@ def process_job(session_factory, job_id: int, llm, transcriber, upload_dir: str)
             _end(job, "needs_person",
                  reason="The answer appears to contain instructions aimed at the scorer. Please read it yourself.")
         else:
+            # Clean score -> done.
             _end(job, "scored")
         db.commit()
 
 
+# Injectable llm/transcriber/session_factory let tests run the loop without network.
 def run(once: bool = False, llm=None, transcriber=None, session_factory=SessionLocal, idle: float = 2.0) -> None:
     """Run the worker loop until stopped, or drain the queue when ``once`` is true."""
     s = get_settings()
     # Build the real clients once per process; tests can inject fakes.
     if llm is None:
+        # No key means it can't score: fail fast instead of looping.
         if not s.deepseek_api_key:
             raise SystemExit("DEEPSEEK_API_KEY is not set. The worker needs it to score answers.")
         llm = DeepSeekClient(s.deepseek_api_key, s.deepseek_base_url, s.deepseek_model)
@@ -201,6 +219,7 @@ def run(once: bool = False, llm=None, transcriber=None, session_factory=SessionL
         transcriber = MockTranscriber() if s.transcriber == "mock" else WhisperTranscriber()
     log.info("worker started (model=%s, transcriber=%s)", llm.model, transcriber.name)
 
+    # Each pass: recover abandoned jobs, claim one job, otherwise idle briefly.
     while True:
         # Recover jobs abandoned by a dead worker before claiming new work.
         recover_stale(session_factory)
@@ -211,6 +230,7 @@ def run(once: bool = False, llm=None, transcriber=None, session_factory=SessionL
         # --once exits only when nothing is left queued or running.
         if once and pending_count(session_factory) == 0:
             break
+        # Nothing to do: wait briefly, then check again.
         time.sleep(idle)
 
 

@@ -10,6 +10,7 @@ from typing import Protocol
 from openai import APIError, APIConnectionError, APIStatusError, OpenAI
 
 
+# Our own error type. `transient` tells the worker whether a retry can help.
 class LLMError(Exception):
     """transient=True: worth retrying. transient=False: retrying won't help (bad key, bad request)."""
 
@@ -18,6 +19,7 @@ class LLMError(Exception):
         self.transient = transient
 
 
+# The shape the worker needs: a model name + one method that returns text.
 class LLMClient(Protocol):
     model: str
 
@@ -38,6 +40,7 @@ class DeepSeekClient:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout = timeout
+        # Tests can pass a fake `client`; otherwise build the real SDK client.
         self._client = client if client is not None else OpenAI(
             api_key=api_key,
             base_url=self.base_url,
@@ -48,6 +51,7 @@ class DeepSeekClient:
 
     def complete(self, system: str, user: str) -> str:
         try:
+            # JSON mode + temperature 0 keeps replies parseable and repeatable.
             response = self._client.chat.completions.create(
                 model=self.model,
                 messages=[
@@ -59,9 +63,10 @@ class DeepSeekClient:
                 max_tokens=500,
             )
         except APIConnectionError as e:
-            # Includes timeouts, DNS and connection failures.
+            # Timeouts, DNS and connection failures: usually temporary.
             raise LLMError(f"Network error: {type(e).__name__}") from e
         except APIStatusError as e:
+            # 429 + 5xx are server-side, so retrying later can succeed.
             if e.status_code == 429 or e.status_code >= 500:
                 raise LLMError(f"DeepSeek returned {e.status_code}") from e
             # 400/401/402/422 etc. are our side; retrying will not help.
@@ -73,6 +78,7 @@ class DeepSeekClient:
             # Unexpected SDK error, e.g. response validation.
             raise LLMError(f"DeepSeek API error: {type(e).__name__}") from e
 
+        # Missing choices/message/content means the reply had the wrong shape.
         try:
             content = response.choices[0].message.content
         except (AttributeError, IndexError, KeyError, TypeError) as e:
