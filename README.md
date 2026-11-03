@@ -1,6 +1,6 @@
 # HR-Internal-System
 
-Full Stack Engineer - Internal Systems: Take-Home Challenge from Talotrace.
+Full Stack Engineer - Internal Systems.
 
 The system suggests a score; HR decides. The Python API owns data, rules and permissions; the
 Next.js frontend only renders what the API returns. See
