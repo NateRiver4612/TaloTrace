@@ -1,6 +1,6 @@
 # HR-Internal-System
 
-Full Stack Engineer - Internal Systems: Take-Home Challenge from Talotrace.
+Full Stack Engineer - Internal Systems.
 
 The system suggests a score; HR decides. See [PLAN.md](PLAN.md) for the build plan and
 [ARCHITECTURE.md](ARCHITECTURE.md) for the current design.
