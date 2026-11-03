@@ -223,3 +223,23 @@ def test_audio_streams_for_hr_only_and_blocks_traversal(client, hr_client, seede
     # Audio answers report has_audio=True and no transcript until the worker runs.
     a = listing(hr_client, seeded["role_id"])[0]["answers"][0]
     assert a["has_audio"] is True and a["transcript"] is None
+
+
+# ---- worker ----
+def test_worker_status_reports_configuration(client, hr_client):
+    # Anonymous callers are blocked by the router's require_hr dependency.
+    assert client.get("/api/hr/worker/status").status_code == 401
+    r = hr_client.get("/api/hr/worker/status")
+    assert r.status_code == 200
+    body = r.json()
+    # DECIDES: the test settings force an empty key, so nothing is configured,
+    # no drain is running, and an empty database has nothing queued.
+    assert set(body) == {"running", "pending", "configured", "last_error"}
+    assert body["configured"] is False
+    assert body["running"] is False
+    assert body["pending"] == 0
+
+
+def test_worker_run_requires_configuration(hr_client):
+    # DECIDES: without DEEPSEEK_API_KEY the API refuses to start a drain.
+    assert hr_client.post("/api/hr/worker/run").status_code == 503
