@@ -1,8 +1,11 @@
+import Link from "next/link";
+
 export default function Home() {
   return (
-    <main style={{ fontFamily: "system-ui, sans-serif", padding: "2rem" }}>
-      <h1>HR Interview Scoring</h1>
-      <p>Project scaffold is running. Interview and HR screens arrive in later phases.</p>
+    <main>
+      <h1>Interview scoring</h1>
+      <p>Candidates: please open the personal link you were emailed.</p>
+      <p><Link href="/hr/login">HR sign-in</Link></p>
     </main>
   );
 }

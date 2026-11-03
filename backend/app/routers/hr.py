@@ -7,13 +7,15 @@ from fastapi.responses import FileResponse
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
+from .. import worker
 from ..config import Settings, get_settings
 from ..db import get_db
 from ..deps import require_hr
 from ..models import (Answer, Candidate, HrOverride, Question, Role, ScoreJob,
                       SuggestedScore, Transcript)
 from ..schemas import (HrAnswerOut, HrCandidateOut, HrRoleOut, JobOut, OverrideIn,
-                       OverrideOut, SuggestionOut, TranscriptOut)
+                       OverrideOut, SuggestionOut, TranscriptOut, WorkerRunOut,
+                       WorkerStatusOut)
 
 # Every route in this router needs a signed-in HR user. One line, applied to all of them.
 router = APIRouter(prefix="/api/hr", tags=["hr"], dependencies=[Depends(require_hr)])
@@ -131,7 +133,7 @@ def override(answer_id: int, body: OverrideIn, hr_user: str = Depends(require_hr
 
 # returns JobOut: {"id", "status", "attempts", "error", "needs_person_reason"}
 @router.post("/jobs/{job_id}/retry", response_model=JobOut)
-def retry(job_id: int, db: Session = Depends(get_db)):
+def retry(job_id: int, settings: Settings = Depends(get_settings), db: Session = Depends(get_db)):
     job = db.get(ScoreJob, job_id)
     if job is None:
         raise HTTPException(404, "Job not found")
@@ -145,4 +147,28 @@ def retry(job_id: int, db: Session = Depends(get_db)):
     if res.rowcount != 1:                                    # already queued/running/scored
         raise HTTPException(409, "Only failed or needs-a-person jobs can be retried.")
     db.refresh(job)
+    # Score the retried answer straight away instead of leaving it queued.
+    if settings.deepseek_api_key:
+        worker.start_background()
     return job_out(job)
+
+
+# returns WorkerStatusOut: {"running", "pending", "configured", "last_error"}
+@router.get("/worker/status", response_model=WorkerStatusOut)
+def worker_status(db: Session = Depends(get_db), settings: Settings = Depends(get_settings)):
+    """Report whether scoring is running and how much is left."""
+    return WorkerStatusOut(
+        running=worker.is_running(),
+        pending=worker.count_pending(db),
+        configured=bool(settings.deepseek_api_key),
+        last_error=worker.last_error(),
+    )
+
+
+# returns WorkerRunOut: {"status": "started" | "already_running"}
+@router.post("/worker/run", response_model=WorkerRunOut)
+def run_worker(settings: Settings = Depends(get_settings)):
+    """Start a background drain so HR can score the queue without a terminal."""
+    if not settings.deepseek_api_key:
+        raise HTTPException(503, "Scoring is not configured: DEEPSEEK_API_KEY is missing.")
+    return WorkerRunOut(status="started" if worker.start_background() else "already_running")
