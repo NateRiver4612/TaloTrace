@@ -21,6 +21,8 @@ htmlcov/
 data/uploads/
 data/seed/
 seed_links.txt
+seed_links.json
+seed_errors.json
 
 # Frontend
 node_modules/

@@ -31,6 +31,7 @@ def settings(tmp_path):
     return Settings(
         upload_dir=str(tmp_path / "uploads"),
         database_url=f"sqlite:///{tmp_path / 'test.db'}",
+        deepseek_api_key="",          # never trigger a real LLM from the tests
     )
 
 

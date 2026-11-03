@@ -88,3 +88,14 @@ class OverrideIn(BaseModel):
         if not v:
             raise ValueError("A reason is required")
         return v
+
+
+class WorkerStatusOut(BaseModel):
+    running: bool
+    pending: int
+    configured: bool
+    last_error: str | None
+
+
+class WorkerRunOut(BaseModel):
+    status: Literal["started", "already_running"]

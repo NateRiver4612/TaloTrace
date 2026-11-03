@@ -9,6 +9,7 @@ review it.
 
 import argparse
 import logging
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -68,12 +69,17 @@ def recover_stale(session_factory) -> None:
         db.commit()
 
 
-def pending_count(session_factory) -> int:
+def count_pending(db) -> int:
     """Count queued/running jobs that belong to current answers."""
+    return db.scalar(select(func.count()).select_from(ScoreJob)
+                     .join(Answer, Answer.id == ScoreJob.answer_id)
+                     .where(ScoreJob.status.in_(["queued", "running"]), Answer.is_current.is_(True)))
+
+
+def pending_count(session_factory) -> int:
+    """Count queued/running jobs for current answers, opening its own session."""
     with session_factory() as db:
-        return db.scalar(select(func.count()).select_from(ScoreJob)
-                         .join(Answer, Answer.id == ScoreJob.answer_id)
-                         .where(ScoreJob.status.in_(["queued", "running"]), Answer.is_current.is_(True)))
+        return count_pending(db)
 
 
 def claim_next_job(session_factory) -> int | None:
@@ -228,13 +234,77 @@ def run(once: bool = False, llm=None, transcriber=None, session_factory=SessionL
             process_job(session_factory, job_id, llm, transcriber, s.upload_dir)
             continue
         # --once exits only when nothing is left queued or running.
+        # other wise it idles and checks again permanently, so a new job can be claimed.
         if once and pending_count(session_factory) == 0:
             break
         # Nothing to do: wait briefly, then check again.
         time.sleep(idle)
 
 
+# ---- run-on-demand control -------------------------------------------------
+#
+# The HR API can start a drain in a background thread so nobody has to keep a
+# terminal open. One drain runs at a time in this process; claim_next_job() is
+# the real concurrency guard, so overlapping processes are still safe.
+
+_state_lock = threading.Lock()
+_running = False
+_last_error: str | None = None
+_clients = None                      # (llm, transcriber), built once and reused
+
+
+def is_running() -> bool:
+    """True while a background drain started by this process is active."""
+    with _state_lock:
+        return _running
+
+
+def last_error() -> str | None:
+    """Why the most recent background drain stopped early, if it did."""
+    with _state_lock:
+        return _last_error
+
+
+def _drain() -> None:
+    """Run one drain to completion, then clear the running flag."""
+    global _running, _last_error, _clients
+    try:
+        if _clients is None:
+            s = get_settings()
+            if not s.deepseek_api_key:
+                raise SystemExit("DEEPSEEK_API_KEY is not set. The worker needs it to score answers.")
+            # Build the clients once; the whisper model stays loaded between runs.
+            transcriber = MockTranscriber() if s.transcriber == "mock" else WhisperTranscriber()
+            _clients = (DeepSeekClient(s.deepseek_api_key, s.deepseek_base_url, s.deepseek_model),
+                        transcriber)
+        run(once=True, llm=_clients[0], transcriber=_clients[1])
+    except SystemExit as e:                          # missing API key
+        _last_error = str(e)
+    except Exception as e:                           # keep the API process alive
+        _last_error = f"{type(e).__name__}: {e}"
+        log.exception("background worker drain failed")
+    finally:
+        with _state_lock:
+            _running = False
+
+
+def start_background() -> bool:
+    """Start a one-shot drain in a daemon thread. False if one is already running."""
+    global _running, _last_error
+    with _state_lock:
+        if _running:
+            return False
+        _running, _last_error = True, None
+    # Doesn't block the API process; the thread will exit when the drain is done 
+    threading.Thread(target=_drain, daemon=True, name="worker-drain").start()
+
+    # Immediately return True so the API can report "started" without waiting for the drain to finish.
+    return True
+
+
 if __name__ == "__main__":
+    # python -m app.worker --once
+
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     ap = argparse.ArgumentParser()
     ap.add_argument("--once", action="store_true", help="drain the queue, then exit")
