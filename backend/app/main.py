@@ -4,7 +4,6 @@ from fastapi import APIRouter, FastAPI
 
 from . import models  # noqa: F401  (registers tables on Base.metadata)
 from .db import Base, engine
-from .routers import interview
 from .routers import hr, hr_auth, interview
 
 @asynccontextmanager
